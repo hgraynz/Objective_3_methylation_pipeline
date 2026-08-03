@@ -1,0 +1,121 @@
+---
+title: "Objective_3_methylation_pipeline"
+format: html
+editor: visual
+---
+
+## Basecalling
+
+```{bash, eval=FALSE}
+#!/bin/bash -e
+
+#SBATCH --account        massey03727
+#SBATCH --job-name       dorado
+#SBATCH --gpus-per-node  A100:1
+#SBATCH --mem            20G
+#SBATCH --cpus-per-task  6
+#SBATCH --time           48:00:00
+#SBATCH --output         dorado_basecaller.out
+#SBATCH --error         %x_%j.err
+
+module purge
+module load Dorado/1.4.0
+
+dorado download --model dna_r10.4.1_e8.2_400bps_sup@v5.2.0
+
+#dorado basecaller <model> <reads> --kit-name <barcode-kit-name> > calls.bam
+dorado basecaller --device 'cuda:all' --min-qscore 10 --no-trim sup,6mA,4mC_5mC 18Nov24/pod5/ > 18Nov24_methyl_calls.bam
+```
+
+
+## Demultiplexing
+
+```{bash, eval=FALSE}
+#!/bin/bash -e
+
+#SBATCH --account        massey03727
+#SBATCH --job-name       dorado_demultiplex
+#SBATCH --mem            20G
+#SBATCH --cpus-per-task  16
+#SBATCH --time           12:00:00
+#SBATCH --output         dorado_demultiplex.out
+#SBATCH --error         %x_%j.err
+
+#purge any other modules loaded in the background. This will avoid potential conflicts. Then load the required
+
+module purge
+module load Dorado/1.4.0
+
+#dorado demux --output-dir <output-dir> --no-classify <input-bam>
+#dorado demux --kit-name SQK-RBK114-24 --emit-fastq --output-dir Barcodes_fastq calls.bam
+dorado demux --kit-name SQK-RBK114-24 --output-dir /nesi/nobackup/massey03727/sequencing_runs_pod5/01Aug24_barcodes /nesi/nobackup/massey03727/sequencing_runs_pod5/01Aug24_methyl_calls.bam
+```
+
+
+```{bash, eval=FALSE}
+#!/bin/bash
+#SBATCH --job-name=bam2fastq
+#SBATCH --account=massey03727
+#SBATCH --time=02:00:00
+#SBATCH --mem=8G
+#SBATCH --cpus-per-task=4
+#SBATCH --output=bam2fastq_%j.out
+#SBATCH --error=bam2fastq_%j.err
+
+module purge
+module load SAMtools/1.23.1-GCC-12.3.0
+
+PARENT_DIR="."   # directory containing the *_barcodes dirs
+
+for dir in "${PARENT_DIR}"/*_barcodes/; do
+    dir="${dir%/}"   # strip trailing slash
+    dir_name=$(basename "${dir}")
+    mapping_file="${dir}/${dir_name}.csv"
+
+    echo "=== Processing directory: ${dir} ==="
+
+    if [[ ! -f "${mapping_file}" ]]; then
+        echo "  WARNING: no ${dir_name}.csv found inside ${dir}, skipping directory" >&2
+        continue
+    fi
+
+    # read mapping file line by line: pattern,sample_name
+    while IFS=',' read -r pattern sample_name; do
+        # strip trailing carriage return / whitespace (common if CSV was
+        # exported from Excel/Sheets on Windows)
+        pattern="${pattern%$'\r'}"
+        sample_name="${sample_name%$'\r'}"
+
+        [[ -z "${pattern}" ]] && continue   # skip blank lines
+
+        bam_file=$(find "${dir}" -maxdepth 1 -type f -name "${pattern}.bam" 2>/dev/null | head -n 1)
+        # also allow patterns that already include .bam in the CSV
+        if [[ -z "${bam_file}" ]]; then
+            bam_file=$(find "${dir}" -maxdepth 1 -type f -name "${pattern}" 2>/dev/null | head -n 1)
+        fi
+
+        if [[ -z "${bam_file}" ]]; then
+            echo "  WARNING: no BAM matching '${pattern}' found in ${dir}, skipping" >&2
+            continue
+        fi
+
+        out_fq="${dir}/${sample_name}.fq"
+
+        echo "  ${bam_file} -> ${out_fq}"
+        if ! samtools fastq -T '*' "${bam_file}" > "${out_fq}"; then
+            echo "  ERROR: samtools fastq failed on ${bam_file}, continuing with next file" >&2
+            rm -f "${out_fq}"   # remove any partial/empty output
+            continue
+        fi
+
+    done < "${mapping_file}"
+
+    echo
+done
+
+echo "Done. Renamed FASTQ files written alongside their source BAMs in each *_barcodes directory."
+
+```
+
+
+
