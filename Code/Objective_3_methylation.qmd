@@ -52,6 +52,73 @@ dorado demux --kit-name SQK-RBK114-24 --output-dir /nesi/nobackup/massey03727/se
 ```
 
 
+## Pulling files to the surface
+
+```{bash, eval=FALSE}
+#!/bin/bash -e
+#SBATCH --account        massey03727
+#SBATCH --job-name       dorado_demultiplex
+#SBATCH --mem            20G
+#SBATCH --cpus-per-task  16
+#SBATCH --time           12:00:00
+#SBATCH --output         dorado_demultiplex.out
+#SBATCH --error          %x_%j.err
+
+# purge any other modules loaded in the background to avoid conflicts, then load the required one
+module purge
+module load Dorado/1.4.0
+
+BASE=/nesi/nobackup/massey03727/sequencing_runs_pod5
+KIT=SQK-RBK114-24
+
+RUNS=(
+  01Aug24
+  05Dec24
+  07Nov24
+  08Jul24
+  1_12_05Sept24
+  12Sept24
+  13_24_05Sept24
+  14Oct24
+  15Aug24
+  18Nov24
+  23Sept24
+  26Aug24
+  29Jul24
+)
+
+# Moves demuxed files up out of the MinKNOW-style nested folders (e.g. pass/barcode01/*.bam)
+# into a flat directory, prefixing filenames with their parent folder name to avoid collisions,
+# then removes the now-empty subfolders.
+flatten_demux() {
+  local dir="$1"
+  find "$dir" -mindepth 2 -type f -name "*.bam" | while read -r f; do
+    parent=$(basename "$(dirname "$f")")
+    mv "$f" "$dir/${parent}_$(basename "$f")"
+  done
+  find "$dir" -mindepth 1 -type d -empty -delete
+}
+
+for RUN in "${RUNS[@]}"; do
+  BAM="${BASE}/${RUN}_methyl_calls.bam"
+  OUT="${BASE}/${RUN}_barcodes"
+
+  if [[ ! -f "$BAM" ]]; then
+    echo "WARNING: $BAM not found, skipping $RUN" >&2
+    continue
+  fi
+
+  echo "Demultiplexing $RUN..."
+  dorado demux --kit-name "$KIT" --output-dir "$OUT" "$BAM"
+
+  echo "Flattening output for $RUN..."
+  flatten_demux "$OUT"
+done
+
+```
+
+## SAMtools
+
 ```{bash, eval=FALSE}
 #!/bin/bash
 #SBATCH --job-name=bam2fastq
@@ -115,6 +182,157 @@ done
 
 echo "Done. Renamed FASTQ files written alongside their source BAMs in each *_barcodes directory."
 
+```
+
+
+## Preparing csv files 
+
+CSV files were generated to rename the barcodes to the isolate names per directory. There were 13 seperate directories, hence the check that all 13 of them have the renaming file. 
+
+```{bash, eval=FALSE}
+#!/bin/bash -e
+#SBATCH --account massey03727
+#SBATCH --job-name=test # job name (shows up in the queue)
+#SBATCH --output=test_rename.log
+#SBATCH --time=00:03:00 # Walltime (HH:MM:SS)
+#SBATCH --cpus-per-task=4 # number of cpus/threads, stick to 2 for now
+#SBATCH --mem=4G            # RAM
+#SBATCH --error         %x_%j.err
+
+module purge
+
+for d in *_barcodes/; do
+    d="${d%/}"
+    if [[ -f "${d}/${d}.csv" ]]; then
+        echo "OK: ${d}"
+    else
+        echo "MISSING: ${d}/${d}.csv"
+    fi
+done
+```
+
+
+## Fastq files moved into one directory
+
+```{bash, eval=FALSE}
+#!/bin/bash
+#SBATCH --job-name=collect_fastq
+#SBATCH --account=massey03727
+#SBATCH --time=00:30:00
+#SBATCH --mem=2G
+#SBATCH --cpus-per-task=8
+#SBATCH --output=collect_fastq_%j.out
+#SBATCH --error=collect_fastq_%j.err
+
+
+PARENT_DIR="."
+COMBINED_DIR="combined_fastq"
+COPY_MODE="cp"   # change to "mv" to move instead of copy
+PARALLEL_JOBS="${SLURM_CPUS_PER_TASK:-4}"
+
+mkdir -p "${COMBINED_DIR}"
+
+# Build a flat list of "source_path" for every .fq file across all directories
+file_list=$(mktemp)
+trap 'rm -f "${file_list}"' EXIT
+
+for dir in "${PARENT_DIR}"/*_barcodes/; do
+    dir="${dir%/}"
+
+    shopt -s nullglob
+    fq_files=("${dir}"/*.fq)
+    shopt -u nullglob
+
+    if [[ ${#fq_files[@]} -eq 0 ]]; then
+        echo "NOTE: no .fq files found in ${dir}, skipping"
+        continue
+    fi
+
+    printf '%s\n' "${fq_files[@]}" >> "${file_list}"
+done
+
+total=$(wc -l < "${file_list}")
+echo "Found ${total} .fq files to copy, using ${PARALLEL_JOBS} parallel workers"
+
+# Warn (but don't block) on filename collisions before copying
+sort -t/ -k2 <(xargs -I{} basename {} < "${file_list}") | uniq -d > /tmp/collision_check.$$
+if [[ -s /tmp/collision_check.$$ ]]; then
+    echo "WARNING: the following filenames appear in more than one source directory:" >&2
+    cat /tmp/collision_check.$$ >&2
+fi
+rm -f /tmp/collision_check.$$
+
+# Do the actual copy in parallel
+xargs -a "${file_list}" -P "${PARALLEL_JOBS}" -I{} "${COPY_MODE}" {} "${COMBINED_DIR}/"
+
+echo
+echo "Done. ${total} .fq files placed in ${COMBINED_DIR}/"
+```
+
+
+There were 11 duplicates. 
+The isolates used were from these directories as per objective 2. 
+- EcCa529a - 05Dec24
+- EcCa530b - 18Nov24
+- EcCa533a - 18Nov24
+- EcCa537d - 18Nov24
+- EcCa541a - 18Nov24
+- EcCa542b - 18Nov24
+- EcCa622a - 05Dec24
+- EcCa622b - 18Nov24
+- EcCa626d - 05Dec24
+- EcCa644a - 05Dec24
+- EcCa644b - 05Dec24
+
+
+## Filtlong
+
+```{bash, eval=FALSE}
+#!/bin/bash
+#SBATCH --job-name=filtlong
+#SBATCH --account=massey03727
+#SBATCH --time=02:00:00
+#SBATCH --mem=8G
+#SBATCH --cpus-per-task=4
+#SBATCH --output=filtlong_%j.out
+#SBATCH --error=filtlong_%j.err
+
+
+module purge
+module load Filtlong/0.2.0
+
+INPUT_DIR="combined_fastq"
+OUTPUT_DIR="filtered_fastq"
+FILTLONG_OPTS="--min_length 1000 --keep_percent 90 --target_bases 500000000"
+
+mkdir -p "${OUTPUT_DIR}"
+
+shopt -s nullglob
+fq_files=("${INPUT_DIR}"/*.fq)
+shopt -u nullglob
+
+if [[ ${#fq_files[@]} -eq 0 ]]; then
+    echo "ERROR: no .fq files found in ${INPUT_DIR}" >&2
+    exit 1
+fi
+
+echo "Found ${#fq_files[@]} isolate FASTQ files in ${INPUT_DIR}"
+
+for fq in "${fq_files[@]}"; do
+    base=$(basename "${fq}" .fq)
+    out_fq="${OUTPUT_DIR}/${base}_QC.fq"
+
+    echo "Filtering ${fq} -> ${out_fq}"
+
+    if ! filtlong ${FILTLONG_OPTS} "${fq}" > "${out_fq}"; then
+        echo "  ERROR: filtlong failed on ${fq}, continuing with next file" >&2
+        rm -f "${out_fq}"
+        continue
+    fi
+done
+
+echo
+echo "Done. Filtered FASTQ files written to ${OUTPUT_DIR}/"
 ```
 
 
