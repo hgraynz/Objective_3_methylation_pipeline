@@ -54,6 +54,8 @@ dorado demux --kit-name SQK-RBK114-24 --output-dir /nesi/nobackup/massey03727/se
 
 ## Pulling files to the surface
 
+"Dorado_methyl_demux.sl"
+
 ```{bash, eval=FALSE}
 #!/bin/bash -e
 #SBATCH --account        massey03727
@@ -118,6 +120,8 @@ done
 ```
 
 ## SAMtools
+
+Script named "Bam2fastq.sl"
 
 ```{bash, eval=FALSE}
 #!/bin/bash
@@ -335,5 +339,100 @@ echo
 echo "Done. Filtered FASTQ files written to ${OUTPUT_DIR}/"
 ```
 
+
+## Sorting 
+
+```{bash, eval=FALSE}
+
+#!/bin/bash
+#SBATCH --job-name=align_sort_isolates
+#SBATCH --account=massey03727
+#SBATCH --time=12:00:00
+#SBATCH --mem=32G
+#SBATCH --cpus-per-task=16
+#SBATCH --output=align_sort_isolates_%j.out
+#SBATCH --error=align_sort_isolates_%j.err
+
+
+module purge
+module load minimap2/2.30-GCC-12.3.0
+module load SAMtools/1.23.1-GCC-12.3.0
+
+FASTA_DIR="fasta_files"
+FASTQ_DIR="filtered_fastq"
+OUTPUT_DIR="sorted_bam"
+THREADS="${SLURM_CPUS_PER_TASK:-8}"
+KEEP_INTERMEDIATE=1   # set to 0 to delete .sam and unsorted .bam files
+
+mkdir -p "${OUTPUT_DIR}"
+
+shopt -s nullglob
+fna_files=("${FASTA_DIR}"/*.fna)
+shopt -u nullglob
+
+if [[ ${#fna_files[@]} -eq 0 ]]; then
+    echo "ERROR: no .fna files found in ${FASTA_DIR}" >&2
+    exit 1
+fi
+
+echo "Found ${#fna_files[@]} assemblies in ${FASTA_DIR}, using ${THREADS} threads"
+
+for fna in "${fna_files[@]}"; do
+    fna_base=$(basename "${fna}" .fna)
+    isolate="${fna_base#fix_}"   # strip "fix_" prefix to get e.g. EcCa539a
+
+    fastq="${FASTQ_DIR}/${isolate}_QC.fq"
+
+    if [[ ! -f "${fastq}" ]]; then
+        echo "WARNING: no matching FASTQ (${fastq}) for ${fna}, skipping" >&2
+        continue
+    fi
+
+    echo "=== ${isolate} ==="
+
+    index="${FASTA_DIR}/${fna_base}.mmi"
+    sam="${OUTPUT_DIR}/${isolate}.sam"
+    bam="${OUTPUT_DIR}/${isolate}.bam"
+    sorted_bam="${OUTPUT_DIR}/${isolate}_sorted.bam"
+
+    echo "  Indexing ${fna} -> ${index}"
+    if ! minimap2 -t "${THREADS}" -d "${index}" "${fna}"; then
+        echo "  ERROR: minimap2 indexing failed for ${isolate}, skipping" >&2
+        continue
+    fi
+
+    echo "  Aligning ${fastq} -> ${sam}"
+    if ! minimap2 -t "${THREADS}" -y -ax map-ont "${index}" "${fastq}" > "${sam}"; then
+        echo "  ERROR: minimap2 alignment failed for ${isolate}, skipping" >&2
+        rm -f "${sam}"
+        continue
+    fi
+
+    echo "  Converting SAM -> BAM"
+    if ! samtools view -@ "${THREADS}" -b "${sam}" > "${bam}"; then
+        echo "  ERROR: samtools view failed for ${isolate}, skipping" >&2
+        continue
+    fi
+
+    echo "  Sorting -> ${sorted_bam}"
+    if ! samtools sort -@ "${THREADS}" "${bam}" -o "${sorted_bam}"; then
+        echo "  ERROR: samtools sort failed for ${isolate}, skipping" >&2
+        continue
+    fi
+
+    echo "  Indexing ${sorted_bam}"
+    samtools index "${sorted_bam}"
+
+    if [[ "${KEEP_INTERMEDIATE}" -eq 0 ]]; then
+        rm -f "${sam}" "${bam}"
+    fi
+
+    echo "  Done: ${sorted_bam}"
+    echo
+done
+
+echo "All isolates processed. Sorted, indexed BAMs are in ${OUTPUT_DIR}/"
+
+```
 
 
