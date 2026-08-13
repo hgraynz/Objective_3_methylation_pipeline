@@ -119,6 +119,33 @@ done
 
 ```
 
+
+## Preparing csv files 
+
+CSV files were generated to rename the barcodes to the isolate names per directory. There were 13 seperate directories, hence the check that all 13 of them have the renaming file. 
+
+```{bash, eval=FALSE}
+#!/bin/bash -e
+#SBATCH --account massey03727
+#SBATCH --job-name=test # job name (shows up in the queue)
+#SBATCH --output=test_rename.log
+#SBATCH --time=00:03:00 # Walltime (HH:MM:SS)
+#SBATCH --cpus-per-task=4 # number of cpus/threads, stick to 2 for now
+#SBATCH --mem=4G            # RAM
+#SBATCH --error         %x_%j.err
+
+module purge
+
+for d in *_barcodes/; do
+    d="${d%/}"
+    if [[ -f "${d}/${d}.csv" ]]; then
+        echo "OK: ${d}"
+    else
+        echo "MISSING: ${d}/${d}.csv"
+    fi
+done
+```
+
 ## SAMtools
 
 Script named "Bam2fastq.sl"
@@ -186,33 +213,6 @@ done
 
 echo "Done. Renamed FASTQ files written alongside their source BAMs in each *_barcodes directory."
 
-```
-
-
-## Preparing csv files 
-
-CSV files were generated to rename the barcodes to the isolate names per directory. There were 13 seperate directories, hence the check that all 13 of them have the renaming file. 
-
-```{bash, eval=FALSE}
-#!/bin/bash -e
-#SBATCH --account massey03727
-#SBATCH --job-name=test # job name (shows up in the queue)
-#SBATCH --output=test_rename.log
-#SBATCH --time=00:03:00 # Walltime (HH:MM:SS)
-#SBATCH --cpus-per-task=4 # number of cpus/threads, stick to 2 for now
-#SBATCH --mem=4G            # RAM
-#SBATCH --error         %x_%j.err
-
-module purge
-
-for d in *_barcodes/; do
-    d="${d%/}"
-    if [[ -f "${d}/${d}.csv" ]]; then
-        echo "OK: ${d}"
-    else
-        echo "MISSING: ${d}/${d}.csv"
-    fi
-done
 ```
 
 
